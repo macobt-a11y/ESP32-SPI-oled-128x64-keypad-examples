@@ -1,0 +1,361 @@
+#include <SPI.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <math.h>
+
+#define SCREEN_WIDTH  128
+#define SCREEN_HEIGHT  64
+
+// OLED Pins (SPI)
+#define OLED_CLK    13  // D0
+#define OLED_MOSI   12  // D1
+#define OLED_RESET  11  // RES
+#define OLED_DC     10  // DC
+#define OLED_CS      8  // CS
+
+// Keypad Pins
+#define PIN_COM      5  // Common Ground Pin
+#define PIN_UP       4
+#define PIN_DOWN     3
+#define PIN_LEFT     2
+#define PIN_RIGHT    1
+#define PIN_MIDDLE  44  // RX on ESP32-S3 SuperMini
+#define PIN_SET     43  // TX on ESP32-S3 SuperMini
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT,
+  OLED_MOSI, OLED_CLK, OLED_DC, OLED_RESET, OLED_CS);
+
+// -------------------------------------------------------------
+// World Map Definition (16x16 Grid)
+// 1 = Wall, 0 = Empty Space, 2 = Exit Door
+// -------------------------------------------------------------
+#define MAP_WIDTH  16
+#define MAP_HEIGHT 16
+
+const uint8_t worldMap[MAP_HEIGHT][MAP_WIDTH] = {
+  {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
+  {1,0,0,0,0,1,0,0,0,0,0,0,0,0,0,1},
+  {1,0,1,1,0,1,0,1,1,1,1,1,0,1,0,1},
+  {1,0,1,0,0,0,0,0,0,0,0,1,0,1,0,1},
+  {1,0,1,0,1,1,1,1,0,1,0,1,0,1,0,1},
+  {1,0,0,0,1,0,0,1,0,1,0,0,0,1,0,1},
+  {1,1,1,0,1,0,0,1,0,1,1,1,1,1,0,1},
+  {1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1},
+  {1,0,1,1,1,1,0,1,1,1,0,1,1,1,0,1},
+  {1,0,1,0,0,1,0,1,0,1,0,1,0,1,0,1},
+  {1,0,1,0,0,1,0,1,0,1,0,1,0,1,0,1},
+  {1,0,0,0,0,0,0,0,0,0,0,0,0,0,2,1}, // 2 = Exit Door
+  {1,1,1,0,1,1,1,1,0,1,1,1,0,1,1,1},
+  {1,0,0,0,0,0,0,1,0,1,0,0,0,0,0,1},
+  {1,0,1,1,1,1,0,0,0,0,0,1,1,1,0,1},
+  {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1}
+};
+
+// -------------------------------------------------------------
+// Collectible Treasures / Prizes
+// -------------------------------------------------------------
+struct Sprite {
+  float x;
+  float y;
+  bool collected;
+};
+
+#define NUM_PRIZES 5
+Sprite prizes[NUM_PRIZES] = {
+  {3.5f,  1.5f, false},
+  {14.5f, 1.5f, false},
+  {1.5f,  7.5f, false},
+  {8.5f,  7.5f, false},
+  {14.5f, 13.5f, false}
+};
+
+int score = 0;
+bool gameWon = false;
+
+// Player Position & Orientation
+float posX = 1.5f, posY = 1.5f;
+float dirX = 1.0f, dirY = 0.0f;
+float planeX = 0.0f, planeY = 0.66f;
+
+float zBuffer[SCREEN_WIDTH]; // Distance buffer for sprite depth sorting
+
+void resetGame() {
+  posX = 1.5f; posY = 1.5f;
+  dirX = 1.0f; dirY = 0.0f;
+  planeX = 0.0f; planeY = 0.66f;
+  score = 0;
+  gameWon = false;
+  for (int i = 0; i < NUM_PRIZES; i++) {
+    prizes[i].collected = false;
+  }
+}
+
+void setup() {
+  pinMode(PIN_COM, OUTPUT);
+  digitalWrite(PIN_COM, LOW);
+
+  pinMode(PIN_UP, INPUT_PULLUP);
+  pinMode(PIN_DOWN, INPUT_PULLUP);
+  pinMode(PIN_LEFT, INPUT_PULLUP);
+  pinMode(PIN_RIGHT, INPUT_PULLUP);
+  pinMode(PIN_MIDDLE, INPUT_PULLUP);
+  pinMode(PIN_SET, INPUT_PULLUP);
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC)) {
+    for (;;);
+  }
+
+  resetGame();
+}
+
+void loop() {
+  // Reset Game Button
+  if (digitalRead(PIN_SET) == LOW) {
+    resetGame();
+  }
+
+  // If Game Won Screen
+  if (gameWon) {
+    display.clearDisplay();
+    display.setTextSize(2);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(15, 10);
+    display.print(F("YOU WIN!"));
+    display.setTextSize(1);
+    display.setCursor(10, 38);
+    display.print(F("All Prizes Found!"));
+    display.setCursor(12, 50);
+    display.print(F("Press SET to Restart"));
+    display.display();
+    return;
+  }
+
+  // -----------------------------------------------------------
+  // 1. Player Controls & Pickup Logic
+  // -----------------------------------------------------------
+  float moveSpeed = 0.07f;
+  float rotSpeed  = 0.06f;
+
+  if (digitalRead(PIN_UP) == LOW) {
+    if (worldMap[(int)posY][(int)(posX + dirX * moveSpeed)] != 1) posX += dirX * moveSpeed;
+    if (worldMap[(int)(posY + dirY * moveSpeed)][(int)posX] != 1) posY += dirY * moveSpeed;
+  }
+  if (digitalRead(PIN_DOWN) == LOW) {
+    if (worldMap[(int)posY][(int)(posX - dirX * moveSpeed)] != 1) posX -= dirX * moveSpeed;
+    if (worldMap[(int)(posY - dirY * moveSpeed)][(int)posX] != 1) posY -= dirY * moveSpeed;
+  }
+
+  if (digitalRead(PIN_LEFT) == LOW) {
+    float oldDirX = dirX;
+    dirX = dirX * cos(-rotSpeed) - dirY * sin(-rotSpeed);
+    dirY = oldDirX * sin(-rotSpeed) + dirY * cos(-rotSpeed);
+    float oldPlaneX = planeX;
+    planeX = planeX * cos(-rotSpeed) - planeY * sin(-rotSpeed);
+    planeY = oldPlaneX * sin(-rotSpeed) + planeY * cos(-rotSpeed);
+  }
+  if (digitalRead(PIN_RIGHT) == LOW) {
+    float oldDirX = dirX;
+    dirX = dirX * cos(rotSpeed) - dirY * sin(rotSpeed);
+    dirY = oldDirX * sin(rotSpeed) + dirY * cos(rotSpeed);
+    float oldPlaneX = planeX;
+    planeX = planeX * cos(rotSpeed) - planeY * sin(rotSpeed);
+    planeY = oldPlaneX * sin(rotSpeed) + planeY * cos(rotSpeed);
+  }
+
+  // Check Treasure Pickup
+  for (int i = 0; i < NUM_PRIZES; i++) {
+    if (!prizes[i].collected) {
+      float dx = posX - prizes[i].x;
+      float dy = posY - prizes[i].y;
+      if (sqrt(dx * dx + dy * dy) < 0.6f) { // Proximity trigger
+        prizes[i].collected = true;
+        score++;
+      }
+    }
+  }
+
+  // Check Exit Goal (Unlocked when all 5 prizes are collected)
+  if (score == NUM_PRIZES && (int)posX == 14 && (int)posY == 11) {
+    gameWon = true;
+  }
+
+  display.clearDisplay();
+
+  // -----------------------------------------------------------
+  // 2. Clear & Clean Wall Rendering (No noisy textures)
+  // -----------------------------------------------------------
+  for (int x = 0; x < SCREEN_WIDTH; x++) {
+    float cameraX = 2.0f * x / (float)SCREEN_WIDTH - 1.0f;
+    float rayDirX = dirX + planeX * cameraX;
+    float rayDirY = dirY + planeY * cameraX;
+
+    int mapX = (int)posX;
+    int mapY = (int)posY;
+
+    float deltaDistX = (rayDirX == 0) ? 1e30 : fabsf(1.0f / rayDirX);
+    float deltaDistY = (rayDirY == 0) ? 1e30 : fabsf(1.0f / rayDirY);
+
+    float sideDistX, sideDistY;
+    int stepX, stepY;
+    int hit = 0;
+    int side = 0;
+    int wallType = 1;
+
+    if (rayDirX < 0) { stepX = -1; sideDistX = (posX - mapX) * deltaDistX; }
+    else            { stepX = 1;  sideDistX = (mapX + 1.0f - posX) * deltaDistX; }
+    if (rayDirY < 0) { stepY = -1; sideDistY = (posY - mapY) * deltaDistY; }
+    else            { stepY = 1;  sideDistY = (mapY + 1.0f - posY) * deltaDistY; }
+
+    while (hit == 0) {
+      if (sideDistX < sideDistY) { sideDistX += deltaDistX; mapX += stepX; side = 0; }
+      else                      { sideDistY += deltaDistY; mapY += stepY; side = 1; }
+      if (worldMap[mapY][mapX] > 0) {
+        hit = 1;
+        wallType = worldMap[mapY][mapX];
+      }
+    }
+
+    float perpWallDist = (side == 0) ? (sideDistX - deltaDistX) : (sideDistY - deltaDistY);
+    if (perpWallDist <= 0.01f) perpWallDist = 0.01f;
+
+    zBuffer[x] = perpWallDist; // Store depth for sprite occlusion
+
+    int lineHeight = (int)(SCREEN_HEIGHT / perpWallDist);
+    int drawStart = -lineHeight / 2 + SCREEN_HEIGHT / 2;
+    int drawEnd = lineHeight / 2 + SCREEN_HEIGHT / 2;
+
+    int rawStart = drawStart;
+    int rawEnd = drawEnd;
+
+    if (drawStart < 0) drawStart = 0;
+    if (drawEnd >= SCREEN_HEIGHT) drawEnd = SCREEN_HEIGHT - 1;
+
+    // Render Walls
+    if (wallType == 2) {
+      // Exit Door: Solid White with Dark Frame
+      display.drawFastVLine(x, drawStart, drawEnd - drawStart + 1, SSD1306_WHITE);
+      if (x % 4 == 0) display.drawFastVLine(x, drawStart, drawEnd - drawStart + 1, SSD1306_BLACK);
+    } else if (side == 1) {
+      // East/West Wall: Solid Clean White
+      display.drawFastVLine(x, drawStart, drawEnd - drawStart + 1, SSD1306_WHITE);
+      // Clean Outline Edges
+      if (rawStart >= 0) display.drawPixel(x, rawStart, SSD1306_BLACK);
+      if (rawEnd < SCREEN_HEIGHT) display.drawPixel(x, rawEnd, SSD1306_BLACK);
+    } else {
+      // North/South Wall: High Contrast Dither (50% Shade)
+      for (int y = drawStart; y <= drawEnd; y++) {
+        if ((x + y) % 2 == 0) display.drawPixel(x, y, SSD1306_WHITE);
+      }
+    }
+  }
+
+  // -----------------------------------------------------------
+  // 3. Render 3D Prize Gems (Sprites)
+  // -----------------------------------------------------------
+  uint32_t currentMillis = millis();
+  int bobOffset = (currentMillis / 200) % 4; // Floating animation
+
+  for (int i = 0; i < NUM_PRIZES; i++) {
+    if (prizes[i].collected) continue;
+
+    float spriteX = prizes[i].x - posX;
+    float spriteY = prizes[i].y - posY;
+
+    float invDet = 1.0f / (planeX * dirY - dirX * planeY);
+    float transformX = invDet * (dirY * spriteX - dirX * spriteY);
+    float transformY = invDet * (-planeY * spriteX + planeX * spriteY);
+
+    if (transformY > 0.1f) {
+      int spriteScreenX = (int)((SCREEN_WIDTH / 2) * (1 + transformX / transformY));
+      int spriteHeight = abs((int)(SCREEN_HEIGHT / transformY));
+      int spriteWidth = spriteHeight;
+
+      int drawStartY = -spriteHeight / 2 + SCREEN_HEIGHT / 2 + bobOffset;
+      int drawEndY = spriteHeight / 2 + SCREEN_HEIGHT / 2 + bobOffset;
+      if (drawStartY < 0) drawStartY = 0;
+      if (drawEndY >= SCREEN_HEIGHT) drawEndY = SCREEN_HEIGHT - 1;
+
+      int drawStartX = -spriteWidth / 2 + spriteScreenX;
+      int drawEndX = spriteWidth / 2 + spriteScreenX;
+      if (drawStartX < 0) drawStartX = 0;
+      if (drawEndX >= SCREEN_WIDTH) drawEndX = SCREEN_WIDTH - 1;
+
+      // Draw Diamond/Gem Sprite
+      for (int stripe = drawStartX; stripe < drawEndX; stripe++) {
+        if (stripe >= 0 && stripe < SCREEN_WIDTH && transformY < zBuffer[stripe]) {
+          int midY = (drawStartY + drawEndY) / 2;
+          int halfH = (drawEndY - drawStartY) / 2;
+          if (halfH < 1) halfH = 1;
+
+          int distFromCenter = abs(stripe - spriteScreenX);
+          int maxDist = (drawEndX - drawStartX) / 2;
+          if (maxDist < 1) maxDist = 1;
+
+          int currentHalfH = halfH * (maxDist - distFromCenter) / maxDist;
+
+          display.drawFastVLine(stripe, midY - currentHalfH, currentHalfH * 2, SSD1306_WHITE);
+        }
+      }
+    }
+  }
+
+  // -----------------------------------------------------------
+  // 4. HUD Header & Prize Counter
+  // -----------------------------------------------------------
+  display.fillRect(0, 0, 128, 10, SSD1306_BLACK);
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(2, 1);
+  display.print(F("GEMS:"));
+  display.print(score);
+  display.print(F("/5"));
+
+  display.setCursor(68, 1);
+  if (score == NUM_PRIZES) {
+    display.print(F("EXIT OPEN!"));
+  } else {
+    display.print(F("FIND GEMS"));
+  }
+  display.drawFastHLine(0, 10, 128, SSD1306_WHITE);
+
+  // -----------------------------------------------------------
+  // 5. Large Mini-Map (Hold MIDDLE Button)
+  // -----------------------------------------------------------
+  if (digitalRead(PIN_MIDDLE) == LOW) {
+    int mapSize = 64;
+    int mapX = (SCREEN_WIDTH - mapSize) / 2;
+    int mapY = (SCREEN_HEIGHT - mapSize) / 2;
+    int cellSize = mapSize / MAP_WIDTH;
+
+    display.fillRect(mapX - 2, mapY - 2, mapSize + 4, mapSize + 4, SSD1306_BLACK);
+    display.drawRect(mapX - 2, mapY - 2, mapSize + 4, mapSize + 4, SSD1306_WHITE);
+
+    for (int my = 0; my < MAP_HEIGHT; my++) {
+      for (int mx = 0; mx < MAP_WIDTH; mx++) {
+        if (worldMap[my][mx] == 1) {
+          display.fillRect(mapX + mx * cellSize, mapY + my * cellSize, cellSize, cellSize, SSD1306_WHITE);
+        } else if (worldMap[my][mx] == 2) {
+          // Exit door marker
+          display.drawRect(mapX + mx * cellSize, mapY + my * cellSize, cellSize, cellSize, SSD1306_WHITE);
+        }
+      }
+    }
+
+    // Render Uncollected Gems on Mini-Map
+    for (int i = 0; i < NUM_PRIZES; i++) {
+      if (!prizes[i].collected) {
+        int gx = mapX + (int)(prizes[i].x * cellSize);
+        int gy = mapY + (int)(prizes[i].y * cellSize);
+        display.fillCircle(gx, gy, 1, SSD1306_WHITE);
+      }
+    }
+
+    // Render Player Position
+    int px = mapX + (int)(posX * cellSize);
+    int py = mapY + (int)(posY * cellSize);
+    display.fillCircle(px, py, 1, SSD1306_WHITE);
+    display.drawLine(px, py, px + (int)(dirX * 5), py + (int)(dirY * 5), SSD1306_WHITE);
+  }
+
+  display.display();
+}

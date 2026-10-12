@@ -1,0 +1,188 @@
+#include <SPI.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+#define SCREEN_WIDTH  128
+#define SCREEN_HEIGHT  64
+
+// OLED Pins (SPI)
+#define OLED_CLK    13  // D0
+#define OLED_MOSI   12  // D1
+#define OLED_RESET  11  // RES
+#define OLED_DC     10  // DC
+#define OLED_CS      8  // CS
+
+// Keypad & Joystick Pins
+#define PIN_COM      5  // Common Ground Pin
+#define PIN_UP       4
+#define PIN_DOWN     3
+#define PIN_LEFT     2
+#define PIN_RIGHT    1
+#define PIN_MIDDLE  44  // RX on ESP32-S3 SuperMini
+#define PIN_SET     43  // TX on ESP32-S3 SuperMini
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT,
+  OLED_MOSI, OLED_CLK, OLED_DC, OLED_RESET, OLED_CS);
+
+// Drawing State Variables
+int cursorX = SCREEN_WIDTH / 2;
+int cursorY = SCREEN_HEIGHT / 2;
+bool penActive = true;     // Start with Pen ACTIVE
+bool blinkState = true;
+uint32_t lastBlinkTime = 0;
+uint32_t lastMoveTime = 0;
+
+// Button Debounce States
+bool lastMiddleState = HIGH;
+bool lastSetState = HIGH;
+
+// Off-screen canvas buffer (128x64 bits = 1024 bytes)
+uint8_t canvasBuffer[SCREEN_WIDTH * SCREEN_HEIGHT / 8];
+
+void clearCanvas() {
+  memset(canvasBuffer, 0, sizeof(canvasBuffer));
+  cursorX = SCREEN_WIDTH / 2;
+  cursorY = SCREEN_HEIGHT / 2;
+}
+
+void setCanvasPixel(int x, int y, bool color) {
+  if (x < 0 || x >= SCREEN_WIDTH || y < 0 || y >= SCREEN_HEIGHT) return;
+  int byteIdx = x + (y / 8) * SCREEN_WIDTH;
+  int bitIdx = y % 8;
+  if (color) {
+    canvasBuffer[byteIdx] |= (1 << bitIdx);
+  } else {
+    canvasBuffer[byteIdx] &= ~(1 << bitIdx);
+  }
+}
+
+bool getCanvasPixel(int x, int y) {
+  if (x < 0 || x >= SCREEN_WIDTH || y < 0 || y >= SCREEN_HEIGHT) return false;
+  int byteIdx = x + (y / 8) * SCREEN_WIDTH;
+  int bitIdx = y % 8;
+  return (canvasBuffer[byteIdx] & (1 << bitIdx)) != 0;
+}
+
+void drawCanvasToDisplay() {
+  for (int y = 0; y < SCREEN_HEIGHT; y++) {
+    for (int x = 0; x < SCREEN_WIDTH; x++) {
+      if (getCanvasPixel(x, y)) {
+        display.drawPixel(x, y, SSD1306_WHITE);
+      }
+    }
+  }
+}
+
+void setup() {
+  // Common Ground for Keypad
+  pinMode(PIN_COM, OUTPUT);
+  digitalWrite(PIN_COM, LOW);
+
+  // Keypad Inputs
+  pinMode(PIN_UP, INPUT_PULLUP);
+  pinMode(PIN_DOWN, INPUT_PULLUP);
+  pinMode(PIN_LEFT, INPUT_PULLUP);
+  pinMode(PIN_RIGHT, INPUT_PULLUP);
+  pinMode(PIN_MIDDLE, INPUT_PULLUP);
+  pinMode(PIN_SET, INPUT_PULLUP);
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC)) {
+    for (;;); // Allocation failed
+  }
+
+  clearCanvas();
+}
+
+void loop() {
+  uint32_t currentMillis = millis();
+
+  // 1. Check SET Button (Clear Canvas)
+  bool currentSet = digitalRead(PIN_SET);
+  if (currentSet == LOW && lastSetState == HIGH) {
+    clearCanvas();
+  }
+  lastSetState = currentSet;
+
+  // 2. Check MIDDLE Button (Toggle Pen ON / OFF)
+  bool currentMiddle = digitalRead(PIN_MIDDLE);
+  if (currentMiddle == LOW && lastMiddleState == HIGH) {
+    penActive = !penActive;
+  }
+  lastMiddleState = currentMiddle;
+
+  // 3. Handle Joystick Movement
+  if (currentMillis - lastMoveTime > 40) { // Speed throttle
+    bool moved = false;
+
+    if (digitalRead(PIN_UP) == LOW && cursorY > 0) {
+      cursorY--;
+      moved = true;
+    }
+    if (digitalRead(PIN_DOWN) == LOW && cursorY < SCREEN_HEIGHT - 1) {
+      cursorY++;
+      moved = true;
+    }
+    if (digitalRead(PIN_LEFT) == LOW && cursorX > 0) {
+      cursorX--;
+      moved = true;
+    }
+    if (digitalRead(PIN_RIGHT) == LOW && cursorX < SCREEN_WIDTH - 1) {
+      cursorX++;
+      moved = true;
+    }
+
+    // Write to canvas if pen is active and cursor moved
+    if (moved && penActive) {
+      setCanvasPixel(cursorX, cursorY, true);
+    }
+    
+    if (moved) lastMoveTime = currentMillis;
+  }
+
+  // Draw initial spot if pen is active at start
+  if (penActive) {
+    setCanvasPixel(cursorX, cursorY, true);
+  }
+
+  // 4. Cursor Blink Timing
+  if (currentMillis - lastBlinkTime > 200) {
+    blinkState = !blinkState;
+    lastBlinkTime = currentMillis;
+  }
+
+  // 5. Render Scene
+  display.clearDisplay();
+
+  // Render stored drawings
+  drawCanvasToDisplay();
+
+  // Draw Blinking Cursor Indicator
+  if (blinkState) {
+    if (penActive) {
+      // Crosshair for PEN ON
+      display.drawFastHLine(cursorX - 2, cursorY, 5, SSD1306_WHITE);
+      display.drawFastVLine(cursorX, cursorY - 2, 5, SSD1306_WHITE);
+    } else {
+      // Hollow box for PEN OFF
+      display.drawRect(cursorX - 2, cursorY - 2, 5, 5, SSD1306_WHITE);
+    }
+  }
+
+  // Header HUD Bar (Status info)
+  display.fillRect(0, 0, 128, 9, SSD1306_BLACK);
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  
+  display.setCursor(0, 0);
+  display.print(penActive ? F("PEN: ON ") : F("PEN: OFF"));
+
+  display.setCursor(75, 0);
+  display.print(F("X:"));
+  display.print(cursorX);
+  display.print(F(" Y:"));
+  display.print(cursorY);
+
+  display.drawFastHLine(0, 9, 128, SSD1306_WHITE);
+
+  display.display();
+}

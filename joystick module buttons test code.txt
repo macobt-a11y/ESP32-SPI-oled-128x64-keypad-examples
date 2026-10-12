@@ -1,0 +1,84 @@
+#include <SPI.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+#define SCREEN_WIDTH  128
+#define SCREEN_HEIGHT  64
+
+// OLED Pins (SPI)
+#define OLED_CLK    13  // D0
+#define OLED_MOSI   12  // D1
+#define OLED_RESET  11  // RES
+#define OLED_DC     10  // DC
+#define OLED_CS      8  // CS
+
+// Keypad Pins
+#define PIN_COM      5  // Common ground
+#define PIN_UP       4
+#define PIN_DOWN     3
+#define PIN_LEFT     2
+#define PIN_RIGHT    1
+#define PIN_MIDDLE  44  // RX on ESP32-S3 SuperMini
+#define PIN_SET     43  // TX on ESP32-S3 SuperMini
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT,
+  OLED_MOSI, OLED_CLK, OLED_DC, OLED_RESET, OLED_CS);
+
+void setup() {
+  Serial.begin(115200);
+
+  // Configure Keypad GND Pin
+  pinMode(PIN_COM, OUTPUT);
+  digitalWrite(PIN_COM, LOW);
+
+  // Configure Keypad Input Pins
+  pinMode(PIN_UP, INPUT_PULLUP);
+  pinMode(PIN_DOWN, INPUT_PULLUP);
+  pinMode(PIN_LEFT, INPUT_PULLUP);
+  pinMode(PIN_RIGHT, INPUT_PULLUP);
+  pinMode(PIN_MIDDLE, INPUT_PULLUP);
+  pinMode(PIN_SET, INPUT_PULLUP);
+
+  // Initialize SSD1306 Display
+  if (!display.begin(SSD1306_SWITCHCAPVCC)) {
+    Serial.println(F("SSD1306 allocation failed!"));
+    for (;;); // Loop forever if display fails
+  }
+
+  // Draw Initial Test Screen
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(15, 10);
+  display.println(F("KEYPAD TEST"));
+  display.drawFastHLine(0, 22, 128, SSD1306_WHITE);
+  display.setCursor(10, 35);
+  display.println(F("PRESS ANY BUTTON"));
+  display.display();
+}
+
+void loop() {
+  String statusText = "NONE";
+
+  if (digitalRead(PIN_UP) == LOW)      statusText = "UP";
+  if (digitalRead(PIN_DOWN) == LOW)    statusText = "DOWN";
+  if (digitalRead(PIN_LEFT) == LOW)    statusText = "LEFT";
+  if (digitalRead(PIN_RIGHT) == LOW)   statusText = "RIGHT";
+  if (digitalRead(PIN_MIDDLE) == LOW)  statusText = "MIDDLE";
+  if (digitalRead(PIN_SET) == LOW)     statusText = "SET";
+
+  // Update Display
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.print(F("ESP32-S3 KEYPAD"));
+  display.drawFastHLine(0, 12, 128, SSD1306_WHITE);
+
+  display.setTextSize(2);
+  display.setCursor(20, 30);
+  display.print(statusText);
+
+  display.display();
+  delay(50);
+}
